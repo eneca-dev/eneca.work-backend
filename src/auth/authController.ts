@@ -50,6 +50,14 @@ export const login = async (req: Request, res: Response) => {
       maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
     });
 
+    // Set refresh token in HTTP-only cookie
+    res.cookie('refresh-token', data.session.refresh_token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 1000 * 60 * 60 * 24 * 30 // 30 days
+    });
+
     // Return user information (without sending the token in response body)
     return res.status(200).json({
       user: {
@@ -84,14 +92,85 @@ export const logout = async (req: Request, res: Response) => {
       });
     }
     
-    // Clear the auth cookie
+    // Clear the auth cookies
     res.clearCookie('auth-token');
+    res.clearCookie('refresh-token');
     
     return res.status(200).json({
       message: 'Logged out successfully'
     });
   } catch (err) {
     console.error('Logout error:', err);
+    return res.status(500).json({
+      message: 'Internal server error',
+      code: 'SERVER_ERROR'
+    });
+  }
+};
+
+/**
+ * Refresh user token
+ */
+export const refreshToken = async (req: Request, res: Response) => {
+  try {
+    const refreshToken = req.cookies['refresh-token'];
+    
+    if (!refreshToken) {
+      return res.status(401).json({
+        message: 'Refresh token not found',
+        code: 'REFRESH_TOKEN_MISSING'
+      });
+    }
+    
+    // Refresh session using Supabase
+    const { data, error } = await supabase.auth.refreshSession({ 
+      refresh_token: refreshToken 
+    });
+    
+    if (error) {
+      console.error('Token refresh error:', error.message);
+      // Clear cookies on error
+      res.clearCookie('auth-token');
+      res.clearCookie('refresh-token');
+      
+      return res.status(401).json({
+        message: 'Failed to refresh token',
+        code: 'REFRESH_FAILED'
+      });
+    }
+    
+    // Set new tokens in cookies
+    res.cookie('auth-token', data.session.access_token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
+    });
+    
+    res.cookie('refresh-token', data.session.refresh_token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 1000 * 60 * 60 * 24 * 30 // 30 days
+    });
+    
+    // Log successful token refresh
+    console.info(`Token refreshed for user ${data.user.email} | ${new Date().toISOString()}`);
+    
+    // Return updated user information
+    return res.status(200).json({
+      user: {
+        id: data.user.id,
+        email: data.user.email
+      },
+      expiresAt: new Date(data.session.expires_at!).getTime()
+    });
+  } catch (err) {
+    console.error('Token refresh error:', err);
+    // Clear cookies on error
+    res.clearCookie('auth-token');
+    res.clearCookie('refresh-token');
+    
     return res.status(500).json({
       message: 'Internal server error',
       code: 'SERVER_ERROR'
