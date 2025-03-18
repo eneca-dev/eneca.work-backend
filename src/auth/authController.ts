@@ -2,6 +2,12 @@ import { Request, Response } from 'express';
 import supabase from '../utils/supabase';
 import { LoginRequest, AuthenticatedRequest } from '../types/auth';
 
+// Хранилище для отслеживания последних обновлений токенов пользователей
+// userId или IP -> timestamp последнего обновления
+const tokenRefreshRateLimit = new Map<string, number>();
+// Минимальный интервал между обновлениями токена (в мс) - 15 минут
+const MIN_REFRESH_INTERVAL = 15 * 60 * 1000;
+
 /**
  * Handle user login
  */
@@ -122,6 +128,23 @@ export const refreshToken = async (req: Request, res: Response) => {
       });
     }
     
+    // Проверка частоты обновления токена
+    const clientIP = req.ip || 'unknown';
+    const clientId = refreshToken.substring(0, 20); // Используем часть токена как идентификатор
+    const key = `${clientId}:${clientIP}`;
+    const lastRefresh = tokenRefreshRateLimit.get(key) || 0;
+    const now = Date.now();
+    
+    // Если с последнего обновления прошло недостаточно времени, отклоняем запрос
+    if (now - lastRefresh < MIN_REFRESH_INTERVAL) {
+      console.log(`Rate limiting token refresh from ${clientIP} - ${Math.floor((now - lastRefresh) / 1000)} seconds since last refresh`);
+      return res.status(429).json({
+        message: 'You are refreshing tokens too frequently. Please try again later.',
+        code: 'REFRESH_RATE_LIMITED',
+        retryAfter: Math.ceil((MIN_REFRESH_INTERVAL - (now - lastRefresh)) / 1000)
+      });
+    }
+    
     // Refresh session using Supabase
     const { data, error } = await supabase.auth.refreshSession({ 
       refresh_token: refreshToken 
@@ -137,6 +160,17 @@ export const refreshToken = async (req: Request, res: Response) => {
         message: 'Failed to refresh token',
         code: 'REFRESH_FAILED'
       });
+    }
+    
+    // Обновляем информацию о последнем обновлении
+    tokenRefreshRateLimit.set(key, now);
+    
+    // Периодически очищаем старые записи (старше 24 часов)
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    for (const [mapKey, timestamp] of tokenRefreshRateLimit.entries()) {
+      if (now - timestamp > ONE_DAY) {
+        tokenRefreshRateLimit.delete(mapKey);
+      }
     }
     
     // Set new tokens in cookies
