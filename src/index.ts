@@ -25,10 +25,15 @@ app.use(
 );
 
 // Routes
-app.use('/auth', authRoutes);
+app.use('/api/auth', authRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// Add API health check endpoint
+app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
