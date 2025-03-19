@@ -57,7 +57,7 @@ export const authenticate = async (
           // Attempt to refresh session using refresh token
           const refreshResult = await supabase.auth.refreshSession({ refresh_token: refreshToken });
           
-          if (refreshResult.error || !refreshResult.data.session) {
+          if (refreshResult.error || !refreshResult.data.session || !refreshResult.data.user) {
             // If refresh fails, clear cookies and return error
             res.clearCookie('auth-token');
             res.clearCookie('refresh-token');
@@ -69,7 +69,10 @@ export const authenticate = async (
           }
           
           // Обновляем время последнего обновления токена
-          lastTokenRefreshMap.set(refreshResult.data.user.id, now);
+          // Убедимся, что refreshResult.data.user существует и имеет id
+          if (refreshResult.data.user && refreshResult.data.user.id) {
+            lastTokenRefreshMap.set(refreshResult.data.user.id, now);
+          }
           
           // Set new tokens in cookies
           res.cookie('auth-token', refreshResult.data.session.access_token, {
@@ -87,9 +90,10 @@ export const authenticate = async (
           });
           
           // Set user from refreshed session
+          // Защитим от возможных null значений
           req.user = {
             id: refreshResult.data.user.id,
-            email: refreshResult.data.user.email!,
+            email: refreshResult.data.user.email || '',
             role: refreshResult.data.user.role || 'user'
           };
           
@@ -128,7 +132,7 @@ export const authenticate = async (
     // Attach user to request
     req.user = {
       id: data.user.id,
-      email: data.user.email!,
+      email: data.user.email || '',
       role: data.user.role || 'user'
     };
 
