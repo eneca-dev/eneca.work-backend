@@ -150,9 +150,8 @@ export const refreshToken = async (req: Request, res: Response) => {
       refresh_token: refreshToken 
     });
     
-    if (error) {
-      console.error('Token refresh error:', error.message);
-      // Clear cookies on error
+    if (error || !data || !data.session || !data.user) {
+      console.error('Token refresh error:', error?.message || 'Session data missing');
       res.clearCookie('auth-token');
       res.clearCookie('refresh-token');
       

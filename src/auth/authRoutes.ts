@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { login, logout, getSession, refreshToken } from './authController';
+import { register, resendConfirmation } from './registerController';
 import rateLimit from 'express-rate-limit';
 import { authenticate } from '../middleware/authMiddleware';
 
@@ -41,10 +42,24 @@ const sessionLimiter = rateLimit({
   }
 });
 
+// Rate limiting for registration attempts
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5, // 5 attempts per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: 'Too many registration attempts, please try again later',
+    code: 'RATE_LIMIT_EXCEEDED'
+  }
+});
+
 // Auth routes
 router.post('/login', loginLimiter, login);
 router.post('/logout', logout);
 router.get('/session', sessionLimiter, authenticate, getSession);
 router.post('/refresh', refreshLimiter, refreshToken);
+router.post('/register', registerLimiter, register);
+router.post('/resend-confirmation', registerLimiter, resendConfirmation);
 
 export default router; 
