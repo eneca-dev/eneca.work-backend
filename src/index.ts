@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import authRoutes from './auth/authRoutes';
 
-// Load environment variables
+// Load environment variables version stable
 dotenv.config();
 
 // Create Express app
