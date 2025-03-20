@@ -5,8 +5,8 @@ import supabase from '../utils/supabase';
 // Хранилище для отслеживания последних обновлений токенов пользователей
 // userId -> timestamp последнего обновления
 const lastTokenRefreshMap = new Map<string, number>();
-// Минимальный интервал между обновлениями токена (в мс) - 15 минут
-const MIN_REFRESH_INTERVAL = 15 * 60 * 1000;
+// Уменьшаем минимальный интервал между обновлениями токена (в мс) - 5 минут (было 15)
+const MIN_REFRESH_INTERVAL = 5 * 60 * 1000;
 
 /**
  * Middleware to authenticate requests using JWT from cookies
@@ -41,15 +41,15 @@ export const authenticate = async (
         const lastRefresh = lastTokenRefreshMap.get(userId) || 0;
         const now = Date.now();
         
-        // Если с последнего обновления прошло меньше минимального интервала, не обновляем токен
-        if (now - lastRefresh < MIN_REFRESH_INTERVAL) {
-          console.log(`Skipping token refresh for user - too soon (${Math.floor((now - lastRefresh) / 1000)} seconds since last refresh)`);
-          res.clearCookie('auth-token');
-          res.clearCookie('refresh-token');
-          
-          return res.status(401).json({
-            message: 'Session refresh rate limited. Please try again later.',
-            code: 'REFRESH_RATE_LIMITED'
+        // Проверяем, не слишком ли часто происходят обновления токена
+        // Блокируем только если было больше 3 обновлений за последние 5 минут
+        const refreshCount = getRefreshCount(userId, now);
+        if (refreshCount > 3 && now - lastRefresh < MIN_REFRESH_INTERVAL) {
+          console.log(`Rate limiting token refresh for user ${userId} - ${refreshCount} refreshes in last 5 minutes`);
+          return res.status(429).json({
+            message: 'Too many token refresh attempts. Please try again later.',
+            code: 'REFRESH_RATE_LIMITED',
+            retryAfter: Math.ceil((MIN_REFRESH_INTERVAL - (now - lastRefresh)) / 1000)
           });
         }
         
@@ -59,8 +59,7 @@ export const authenticate = async (
           
           if (refreshResult.error || !refreshResult.data.session || !refreshResult.data.user) {
             // If refresh fails, clear cookies and return error
-            res.clearCookie('auth-token');
-            res.clearCookie('refresh-token');
+            clearAuthCookies(res);
             
             return res.status(401).json({
               message: 'Session expired. Please login again.',
@@ -71,23 +70,12 @@ export const authenticate = async (
           // Обновляем время последнего обновления токена
           // Убедимся, что refreshResult.data.user существует и имеет id
           if (refreshResult.data.user && refreshResult.data.user.id) {
+            recordRefresh(refreshResult.data.user.id, now);
             lastTokenRefreshMap.set(refreshResult.data.user.id, now);
           }
           
-          // Set new tokens in cookies
-          res.cookie('auth-token', refreshResult.data.session.access_token, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
-          });
-          
-          res.cookie('refresh-token', refreshResult.data.session.refresh_token, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 1000 * 60 * 60 * 24 * 30 // 30 days
-          });
+          // Set new tokens in cookies с улучшенными настройками
+          setAuthCookies(res, refreshResult.data.session.access_token, refreshResult.data.session.refresh_token);
           
           // Set user from refreshed session
           // Защитим от возможных null значений
@@ -111,8 +99,7 @@ export const authenticate = async (
           return next();
         } catch (refreshErr) {
           console.error('Token refresh error in middleware:', refreshErr);
-          res.clearCookie('auth-token');
-          res.clearCookie('refresh-token');
+          clearAuthCookies(res);
           
           return res.status(401).json({
             message: 'Invalid or expired session',
@@ -122,7 +109,7 @@ export const authenticate = async (
       }
       
       // If no refresh token, clear cookie and return error
-      res.clearCookie('auth-token');
+      clearAuthCookies(res);
       return res.status(401).json({
         message: 'Invalid or expired token',
         code: 'INVALID_TOKEN'
@@ -144,4 +131,81 @@ export const authenticate = async (
       code: 'SERVER_ERROR'
     });
   }
-}; 
+};
+
+// Улучшенный механизм отслеживания количества обновлений
+const refreshHistory = new Map<string, number[]>();
+
+function recordRefresh(userId: string, timestamp: number) {
+  if (!refreshHistory.has(userId)) {
+    refreshHistory.set(userId, []);
+  }
+  
+  const userHistory = refreshHistory.get(userId)!;
+  userHistory.push(timestamp);
+  
+  // Удаляем старые записи (старше 5 минут)
+  const cutoff = timestamp - MIN_REFRESH_INTERVAL;
+  const newHistory = userHistory.filter(time => time >= cutoff);
+  refreshHistory.set(userId, newHistory);
+}
+
+function getRefreshCount(userId: string, now: number): number {
+  if (!refreshHistory.has(userId)) {
+    return 0;
+  }
+  
+  const userHistory = refreshHistory.get(userId)!;
+  const cutoff = now - MIN_REFRESH_INTERVAL;
+  return userHistory.filter(time => time >= cutoff).length;
+}
+
+// Централизованная установка кук аутентификации
+function setAuthCookies(res: Response, accessToken: string, refreshToken: string) {
+  // Определяем правильные настройки для куки
+  const isProd = process.env.NODE_ENV === 'production';
+  const secureCookie = isProd;
+  const cookieDomain = isProd ? '.eneca.work' : undefined; // В продакшене используем домен .eneca.work
+  
+  // Access token cookie
+  res.cookie('auth-token', accessToken, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: isProd ? 'none' : 'lax', // none для cross-origin в продакшене
+    domain: cookieDomain,
+    path: '/',
+    maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
+  });
+  
+  // Refresh token cookie
+  res.cookie('refresh-token', refreshToken, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: isProd ? 'none' : 'lax', // none для cross-origin в продакшене
+    domain: cookieDomain,
+    path: '/',
+    maxAge: 1000 * 60 * 60 * 24 * 30 // 30 days
+  });
+}
+
+// Централизованная очистка кук аутентификации
+function clearAuthCookies(res: Response) {
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieDomain = isProd ? '.eneca.work' : undefined;
+  
+  res.clearCookie('auth-token', {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    domain: cookieDomain,
+    path: '/'
+  });
+  
+  res.clearCookie('refresh-token', {
+    httpOnly: true, 
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    domain: cookieDomain,
+    path: '/'
+  });
+} 
