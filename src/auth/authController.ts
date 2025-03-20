@@ -48,17 +48,39 @@ export const login = async (req: Request, res: Response) => {
     // Log successful login
     console.info(`User ${email} logged in successfully | ${new Date().toISOString()}`);
     
+    // Логирование информации о сессии и времени истечения
+    const expiresAtRaw = data.session.expires_at;
+    const expiresAtDate = new Date(expiresAtRaw as string | number);
+    const expiresAtMs = expiresAtDate.getTime();
+    const nowMs = Date.now();
+    const timeUntilExpiry = expiresAtMs - nowMs;
+    
+    console.log(`TOKEN INFO: expires_at raw value = ${expiresAtRaw}, type = ${typeof expiresAtRaw}`);
+    console.log(`TOKEN INFO: converted to Date = ${expiresAtDate.toISOString()}`);
+    console.log(`TOKEN INFO: converted to ms = ${expiresAtMs}, current time = ${nowMs}`);
+    console.log(`TOKEN INFO: time until expiry = ${timeUntilExpiry}ms (${Math.floor(timeUntilExpiry/1000/60)} minutes)`);
+    
+    // Проверка корректности времени истечения
+    if (timeUntilExpiry <= 0) {
+      console.error(`CRITICAL ERROR: Token already expired upon creation!`);
+    }
+    
     // Установка куки с использованием централизованной функции
     setAuthCookies(res, data.session.access_token, data.session.refresh_token);
 
     // Return user information (without sending the token in response body)
+    // Гарантируем, что expiresAt - это метка времени в миллисекундах
+    const expiresAt = typeof expiresAtRaw === 'number' 
+      ? expiresAtRaw * 1000  // Если это Unix timestamp в секундах, переводим в миллисекунды
+      : expiresAtMs;         // Иначе используем уже преобразованное значение
+    
     return res.status(200).json({
       user: {
         id: data.user.id,
         email: data.user.email,
         profile: profile
       },
-      expiresAt: new Date(data.session.expires_at!).getTime()
+      expiresAt: expiresAt
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -105,77 +127,92 @@ export const logout = async (req: Request, res: Response) => {
  */
 export const refreshToken = async (req: Request, res: Response) => {
   try {
+    // Get refresh token from cookie
     const refreshToken = req.cookies['refresh-token'];
     
     if (!refreshToken) {
+      console.log('Refresh token missing in request');
       return res.status(401).json({
         message: 'Refresh token not found',
         code: 'REFRESH_TOKEN_MISSING'
       });
     }
     
-    // Проверка частоты обновления токена - используем улучшенный механизм подсчета
+    // Extract client info for rate limiting
     const clientIP = req.ip || 'unknown';
-    const clientId = refreshToken.substring(0, 20); // Используем часть токена как идентификатор
+    const clientId = refreshToken.substring(0, 20); // Use part of refresh token as client ID
     const key = `${clientId}:${clientIP}`;
     const refreshCount = getRefreshCount(key);
-    const now = Date.now();
     
-    // Проверяем количество обновлений в последние 5 минут
+    // Log refresh attempt
+    console.log(`Token refresh attempt from IP: ${clientIP}, client ID: ${clientId.substring(0, 10)}..., count: ${refreshCount}`);
+    
+    // Rate limiting
     if (refreshCount > 5) {
       console.log(`Rate limiting token refresh from ${clientIP} - ${refreshCount} refreshes in last 5 minutes`);
       return res.status(429).json({
         message: 'You are refreshing tokens too frequently. Please try again later.',
         code: 'REFRESH_RATE_LIMITED',
-        retryAfter: 60 // 1 минута до следующей попытки
+        retryAfter: 60
       });
     }
     
-    // Refresh session using Supabase
+    // Refresh session via Supabase
     const { data, error } = await supabase.auth.refreshSession({ 
       refresh_token: refreshToken 
     });
     
+    // Handle refresh error
     if (error || !data || !data.session || !data.user) {
       console.error('Token refresh error:', error?.message || 'Session data missing');
       clearAuthCookies(res);
-      
       return res.status(401).json({
-        message: 'Failed to refresh token',
+        message: 'Failed to refresh token. Please login again.',
         code: 'REFRESH_FAILED'
       });
     }
     
-    // Записываем обновление токена
+    // Log successful refresh
+    const expiresAtRaw = data.session.expires_at;
+    const expiresAtDate = new Date(expiresAtRaw as string | number);
+    const expiresAtMs = expiresAtDate.getTime();
+    const nowMs = Date.now();
+    const timeUntilExpiry = expiresAtMs - nowMs;
+    
+    console.log(`REFRESH SUCCESS: expires_at raw = ${expiresAtRaw}, type = ${typeof expiresAtRaw}`);
+    console.log(`REFRESH SUCCESS: converted to Date = ${expiresAtDate.toISOString()}`);
+    console.log(`REFRESH SUCCESS: time until expiry = ${timeUntilExpiry}ms (${Math.floor(timeUntilExpiry/1000/60)} minutes)`);
+    
+    // Record refresh for rate limiting
     recordRefresh(key);
     
-    // Установка куки с использованием централизованной функции
+    // Set new auth cookies
     setAuthCookies(res, data.session.access_token, data.session.refresh_token);
     
-    // Получение профиля пользователя
+    // Get updated user profile
     const { data: profile } = await supabase
       .from('profiles')
       .select('*')
       .eq('user_id', data.user.id)
       .single();
     
-    // Log successful token refresh
-    console.info(`Token refreshed for user ${data.user.email} | ${new Date().toISOString()}`);
+    // Гарантируем, что expiresAt - это метка времени в миллисекундах
+    const expiresAt = typeof expiresAtRaw === 'number' 
+      ? expiresAtRaw * 1000  // Если это Unix timestamp в секундах, переводим в миллисекунды
+      : expiresAtMs;         // Иначе используем уже преобразованное значение
     
-    // Return updated user information
+    // Return updated user info
     return res.status(200).json({
       user: {
         id: data.user.id,
         email: data.user.email,
         profile: profile
       },
-      expiresAt: new Date(data.session.expires_at!).getTime()
+      expiresAt: expiresAt
     });
   } catch (err) {
-    console.error('Token refresh error:', err);
-    // Clear cookies on error
+    console.error('Refresh token error:', err);
     clearAuthCookies(res);
-    
     return res.status(500).json({
       message: 'Internal server error',
       code: 'SERVER_ERROR'
@@ -230,6 +267,8 @@ export function setAuthCookies(res: Response, accessToken: string, refreshToken:
   const isProd = process.env.NODE_ENV === 'production';
   const secureCookie = isProd;
   const cookieDomain = isProd ? '.eneca.work' : undefined; // В продакшене используем домен .eneca.work
+  
+  console.log(`Setting cookies with domain: ${cookieDomain}, secure: ${secureCookie}, sameSite: ${isProd ? 'none' : 'lax'}`);
   
   // Access token cookie
   res.cookie('auth-token', accessToken, {

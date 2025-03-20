@@ -17,98 +17,49 @@ export const authenticate = async (
   next: NextFunction
 ) => {
   try {
+    const requestPath = req.path || 'unknown';
+    console.log(`[AUTH] Authenticating request to: ${requestPath}`);
+    
     // Get token from cookie
     const token = req.cookies['auth-token'];
     
     if (!token) {
+      console.log(`[AUTH] No auth-token cookie found for request to ${requestPath}`);
+      // Проверяем наличие refresh токена для потенциального восстановления сессии
+      const refreshToken = req.cookies['refresh-token'];
+      if (refreshToken) {
+        console.log(`[AUTH] Found refresh-token, will attempt to refresh session`);
+        // Перенаправляем на обработку обновления токена
+        return handleRefreshToken(req, res, next, refreshToken);
+      }
+      
       return res.status(401).json({
         message: 'Authentication required',
         code: 'AUTH_REQUIRED'
       });
     }
 
-    // Verify token with Supabase
+    // Вывод для отладки токена
+    const tokenFirstChars = token.substring(0, 10);
+    console.log(`[AUTH] Found auth-token starting with: ${tokenFirstChars}...`);
+
+    // Validate token via Supabase
+    console.log(`[AUTH] Validating token with Supabase`);
     const { data, error } = await supabase.auth.getUser(token);
 
-    if (error || !data.user) {
-      // Try to refresh token if refresh-token exists
+    if (error || !data || !data.user) {
+      console.error(`[AUTH] Token validation failed: ${error?.message || 'No user data returned'}`);
+      
+      // Attempt to refresh session using refresh token
       const refreshToken = req.cookies['refresh-token'];
       
       if (refreshToken) {
-        // Проверяем, не было ли недавних обновлений токена для этого пользователя
-        // Для неаутентифицированного пользователя используем refresh token как ключ
-        const userId = data?.user?.id || refreshToken.substring(0, 20);  // Используем часть токена как id если нет userId
-        const lastRefresh = lastTokenRefreshMap.get(userId) || 0;
-        const now = Date.now();
-        
-        // Проверяем, не слишком ли часто происходят обновления токена
-        // Блокируем только если было больше 3 обновлений за последние 5 минут
-        const refreshCount = getRefreshCount(userId, now);
-        if (refreshCount > 3 && now - lastRefresh < MIN_REFRESH_INTERVAL) {
-          console.log(`Rate limiting token refresh for user ${userId} - ${refreshCount} refreshes in last 5 minutes`);
-          return res.status(429).json({
-            message: 'Too many token refresh attempts. Please try again later.',
-            code: 'REFRESH_RATE_LIMITED',
-            retryAfter: Math.ceil((MIN_REFRESH_INTERVAL - (now - lastRefresh)) / 1000)
-          });
-        }
-        
-        try {
-          // Attempt to refresh session using refresh token
-          const refreshResult = await supabase.auth.refreshSession({ refresh_token: refreshToken });
-          
-          if (refreshResult.error || !refreshResult.data.session || !refreshResult.data.user) {
-            // If refresh fails, clear cookies and return error
-            clearAuthCookies(res);
-            
-            return res.status(401).json({
-              message: 'Session expired. Please login again.',
-              code: 'SESSION_EXPIRED'
-            });
-          }
-          
-          // Обновляем время последнего обновления токена
-          // Убедимся, что refreshResult.data.user существует и имеет id
-          if (refreshResult.data.user && refreshResult.data.user.id) {
-            recordRefresh(refreshResult.data.user.id, now);
-            lastTokenRefreshMap.set(refreshResult.data.user.id, now);
-          }
-          
-          // Set new tokens in cookies с улучшенными настройками
-          setAuthCookies(res, refreshResult.data.session.access_token, refreshResult.data.session.refresh_token);
-          
-          // Set user from refreshed session
-          // Защитим от возможных null значений
-          req.user = {
-            id: refreshResult.data.user.id,
-            email: refreshResult.data.user.email || '',
-            role: refreshResult.data.user.role || 'user'
-          };
-          
-          // Cleanup old entries in the map (удаляем записи старше 24 часов)
-          const ONE_DAY = 24 * 60 * 60 * 1000;
-          for (const [key, timestamp] of lastTokenRefreshMap.entries()) {
-            if (now - timestamp > ONE_DAY) {
-              lastTokenRefreshMap.delete(key);
-            }
-          }
-          
-          console.log(`Token refreshed successfully for user ${refreshResult.data.user.id}`);
-          
-          // Continue with refreshed token
-          return next();
-        } catch (refreshErr) {
-          console.error('Token refresh error in middleware:', refreshErr);
-          clearAuthCookies(res);
-          
-          return res.status(401).json({
-            message: 'Invalid or expired session',
-            code: 'INVALID_SESSION'
-          });
-        }
+        console.log(`[AUTH] Found refresh-token, attempting to refresh session`);
+        return handleRefreshToken(req, res, next, refreshToken);
       }
       
-      // If no refresh token, clear cookie and return error
+      // If no refresh token, clear cookies and return error
+      console.log('[AUTH] No refresh-token found, authentication failed');
       clearAuthCookies(res);
       return res.status(401).json({
         message: 'Invalid or expired token',
@@ -116,7 +67,8 @@ export const authenticate = async (
       });
     }
 
-    // Attach user to request
+    // Valid token, attach user to request
+    console.log(`[AUTH] Token valid for user: ${data.user.email}`);
     req.user = {
       id: data.user.id,
       email: data.user.email || '',
@@ -133,31 +85,108 @@ export const authenticate = async (
   }
 };
 
-// Улучшенный механизм отслеживания количества обновлений
-const refreshHistory = new Map<string, number[]>();
-
-function recordRefresh(userId: string, timestamp: number) {
-  if (!refreshHistory.has(userId)) {
-    refreshHistory.set(userId, []);
+/**
+ * Helper function to handle refresh token logic
+ */
+async function handleRefreshToken(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+  refreshToken: string
+) {
+  try {
+    const now = Date.now();
+    
+    // Короткая выдержка из токена для логирования (без полного раскрытия)
+    const tokenPart = refreshToken.substring(0, 10);
+    console.log(`[AUTH:REFRESH] Processing refresh token: ${tokenPart}...`);
+    
+    // Проверка на ограничение частоты обновления
+    const refreshedUserId = getUserIdFromRefreshToken(refreshToken);
+    if (refreshedUserId) {
+      const lastRefresh = lastTokenRefreshMap.get(refreshedUserId);
+      if (lastRefresh && now - lastRefresh < MIN_REFRESH_INTERVAL) {
+        const timeSinceRefresh = now - lastRefresh;
+        console.log(`[AUTH:REFRESH] Rate limiting token refresh, last refresh was ${timeSinceRefresh}ms ago`);
+        
+        // Если последнее обновление было слишком недавно, все равно продолжаем обработку,
+        // но логируем для потенциальной отладки проблем с частыми обновлениями
+      }
+    }
+    
+    console.log(`[AUTH:REFRESH] Calling Supabase to refresh session`);
+    // Attempt to refresh session using refresh token
+    const refreshResult = await supabase.auth.refreshSession({ refresh_token: refreshToken });
+    
+    if (refreshResult.error || !refreshResult.data.session || !refreshResult.data.user) {
+      console.error(`[AUTH:REFRESH] Failed to refresh session: ${refreshResult.error?.message || 'No session data'}`);
+      // If refresh fails, clear cookies and return error
+      clearAuthCookies(res);
+      
+      return res.status(401).json({
+        message: 'Session expired. Please login again.',
+        code: 'SESSION_EXPIRED'
+      });
+    }
+    
+    // Логирование успешного обновления и информации о новой сессии
+    const userId = refreshResult.data.user.id;
+    console.log(`[AUTH:REFRESH] Session refreshed successfully for user: ${refreshResult.data.user.email}`);
+    
+    // Данные о времени истечения сессии
+    const expiresAtRaw = refreshResult.data.session.expires_at;
+    const expiresAt = new Date(expiresAtRaw!);
+    const timeUntilExpiry = expiresAt.getTime() - now;
+    console.log(`[AUTH:REFRESH] New token expires at: ${expiresAt.toISOString()}`);
+    console.log(`[AUTH:REFRESH] Time until expiry: ${timeUntilExpiry}ms (${Math.floor(timeUntilExpiry/1000/60)} minutes)`);
+    
+    // Update refresh time tracking
+    lastTokenRefreshMap.set(userId, now);
+    
+    // Set new tokens in cookies
+    setAuthCookies(res, refreshResult.data.session.access_token, refreshResult.data.session.refresh_token);
+    
+    // Set user from refreshed session
+    req.user = {
+      id: userId,
+      email: refreshResult.data.user.email || '',
+      role: refreshResult.data.user.role || 'user'
+    };
+    
+    // Cleanup old entries in the map (delete entries older than 24 hours)
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    for (const [key, timestamp] of lastTokenRefreshMap.entries()) {
+      if (now - timestamp > ONE_DAY) {
+        lastTokenRefreshMap.delete(key);
+      }
+    }
+    
+    // Continue with refreshed token
+    return next();
+  } catch (refreshErr) {
+    console.error(`[AUTH:REFRESH] Unexpected error during refresh:`, refreshErr);
+    clearAuthCookies(res);
+    
+    return res.status(401).json({
+      message: 'Invalid or expired session',
+      code: 'INVALID_SESSION'
+    });
   }
-  
-  const userHistory = refreshHistory.get(userId)!;
-  userHistory.push(timestamp);
-  
-  // Удаляем старые записи (старше 5 минут)
-  const cutoff = timestamp - MIN_REFRESH_INTERVAL;
-  const newHistory = userHistory.filter(time => time >= cutoff);
-  refreshHistory.set(userId, newHistory);
 }
 
-function getRefreshCount(userId: string, now: number): number {
-  if (!refreshHistory.has(userId)) {
-    return 0;
+/**
+ * Try to extract user ID from refresh token for rate limiting
+ * This is a simplified implementation and might not work with all token formats
+ */
+function getUserIdFromRefreshToken(token: string): string | null {
+  try {
+    // Мы не можем декодировать refresh token напрямую, так как это не JWT
+    // Используем часть токена как идентификатор для rate limiting
+    return token.substring(0, 20);
+  } catch (err) {
+    console.error('[AUTH] Error extracting user ID from refresh token:', err);
+    return null;
   }
-  
-  const userHistory = refreshHistory.get(userId)!;
-  const cutoff = now - MIN_REFRESH_INTERVAL;
-  return userHistory.filter(time => time >= cutoff).length;
 }
 
 // Централизованная установка кук аутентификации
@@ -166,6 +195,8 @@ function setAuthCookies(res: Response, accessToken: string, refreshToken: string
   const isProd = process.env.NODE_ENV === 'production';
   const secureCookie = isProd;
   const cookieDomain = isProd ? '.eneca.work' : undefined; // В продакшене используем домен .eneca.work
+  
+  console.log(`[COOKIES] Setting auth cookies: domain=${cookieDomain}, secure=${secureCookie}, sameSite=${isProd ? 'none' : 'lax'}`);
   
   // Access token cookie
   res.cookie('auth-token', accessToken, {
@@ -192,6 +223,8 @@ function setAuthCookies(res: Response, accessToken: string, refreshToken: string
 function clearAuthCookies(res: Response) {
   const isProd = process.env.NODE_ENV === 'production';
   const cookieDomain = isProd ? '.eneca.work' : undefined;
+  
+  console.log(`[COOKIES] Clearing auth cookies: domain=${cookieDomain}`);
   
   res.clearCookie('auth-token', {
     httpOnly: true,
