@@ -29,7 +29,8 @@ app.use(
       const allowedOrigins = [
         CORS_ORIGIN,
         'https://eneca.work',
-        'https://www.eneca.work'
+        'https://www.eneca.work',
+        'http://local.eneca.work'
       ];
       
       if (allowedOrigins.indexOf(origin) !== -1) {
