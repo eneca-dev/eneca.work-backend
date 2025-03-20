@@ -48,17 +48,9 @@ app.use(
 // Routes
 app.use('/api/auth', authRoutes);
 
-// Legacy route support for backwards compatibility (временно)
-app.use('/auth', authRoutes);
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
-// Add API health check endpoint
+// API health check endpoint
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
+  res.status(200).json({ status: 'ok', env: process.env.NODE_ENV });
 });
 
 // Start server
