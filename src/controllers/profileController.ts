@@ -1,10 +1,11 @@
-import { Request, Response } from 'express';
-import { supabase } from '../utils/supabase';
+import { Response } from 'express';
+import { AuthenticatedRequest } from '../types/auth';
+import supabase from '../utils/supabase';
 
 /**
  * Получение профиля пользователя с учетом связанных данных
  */
-export const getProfile = async (req: Request, res: Response) => {
+export const getProfile = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user?.id;
     
@@ -44,7 +45,7 @@ export const getProfile = async (req: Request, res: Response) => {
 /**
  * Обновление профиля пользователя
  */
-export const updateProfile = async (req: Request, res: Response) => {
+export const updateProfile = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user?.id;
     
@@ -88,7 +89,7 @@ export const updateProfile = async (req: Request, res: Response) => {
 /**
  * Получение справочных данных
  */
-export const getReferences = async (req: Request, res: Response) => {
+export const getReferences = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { type } = req.params;
     let data = null;
