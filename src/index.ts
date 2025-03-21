@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import authRoutes from './auth/authRoutes';
+import profileRoutes from './routes/profileRoutes';
 
 // Load environment variables version stable
 dotenv.config();
@@ -48,6 +49,7 @@ app.use(
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api', profileRoutes);
 
 // API health check endpoint
 app.get('/api/health', (req, res) => {
